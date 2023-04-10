@@ -33,7 +33,7 @@ using System.Reflection;
 
 namespace nadena.dev.modular_avatar.core
 {
-    internal static class RuntimeUtil
+    public static class RuntimeUtil
     {
         // Initialized in Util
         public static Action<Action> delayCall = (_) => { };
