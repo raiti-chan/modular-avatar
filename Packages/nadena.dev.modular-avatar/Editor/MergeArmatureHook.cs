@@ -25,6 +25,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using nadena.dev.modular_avatar.editor.ErrorReporting;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.Animations;
@@ -49,17 +50,14 @@ namespace nadena.dev.modular_avatar.core.editor
 
             foreach (var mergeArmature in mergeArmatures)
             {
-                mergedObjects.Clear();
-                thisPassAdded.Clear();
-                MergeArmature(mergeArmature);
-                PruneDuplicatePhysBones();
-                UnityEngine.Object.DestroyImmediate(mergeArmature);
-            }
-
-            foreach (var renderer in avatarGameObject.transform.GetComponentsInChildren<SkinnedMeshRenderer>(true))
-            {
-                var bones = renderer.bones;
-                renderer.bones = bones;
+                BuildReport.ReportingObject(mergeArmature, () =>
+                {
+                    mergedObjects.Clear();
+                    thisPassAdded.Clear();
+                    MergeArmature(mergeArmature);
+                    PruneDuplicatePhysBones();
+                    UnityEngine.Object.DestroyImmediate(mergeArmature);
+                });
             }
 
             foreach (var c in avatarGameObject.transform.GetComponentsInChildren<VRCPhysBone>(true))
@@ -169,7 +167,9 @@ namespace nadena.dev.modular_avatar.core.editor
         }
 
         private List<IntermediateObj> intermediateObjects = new List<IntermediateObj>();
-        private Dictionary<string, List<string>> activationPathMappings = new Dictionary<string, List<string>>();
+
+        private Dictionary<string, List<GameObject>>
+            activationPathMappings = new Dictionary<string, List<GameObject>>();
 
         private void MergeArmature(ModularAvatarMergeArmature mergeArmature)
         {
@@ -211,7 +211,8 @@ namespace nadena.dev.modular_avatar.core.editor
                     {
                         foreach (var mapping in mappings)
                         {
-                            clip.SetCurve(mapping, typeof(GameObject), "m_IsActive", curve);
+                            clip.SetCurve(PathMappings.GetObjectIdentifier(mapping), typeof(GameObject), "m_IsActive",
+                                curve);
                         }
                     }
                 }
@@ -255,7 +256,7 @@ namespace nadena.dev.modular_avatar.core.editor
                     });
                     if (prefix.Length > 0) prefix += "/";
                     prefix += intermediate;
-                    activationPathMappings[originPath] = new List<string>();
+                    activationPathMappings[originPath] = new List<GameObject>();
                 }
             }
         }
@@ -271,7 +272,8 @@ namespace nadena.dev.modular_avatar.core.editor
         {
             if (src == newParent)
             {
-                throw new Exception("[ModularAvatar] Attempted to merge an armature into itself! Aborting build...");
+                // Error reported by validation framework
+                return;
             }
 
             if (zipMerge)
@@ -317,7 +319,7 @@ namespace nadena.dev.modular_avatar.core.editor
 
                     switchPath += intermediate.name;
 
-                    activationPathMappings[intermediate.originPath].Add(RuntimeUtil.AvatarRootPath(switchObj));
+                    activationPathMappings[intermediate.originPath].Add(switchObj);
 
                     mergedSrcBone = switchObj;
 

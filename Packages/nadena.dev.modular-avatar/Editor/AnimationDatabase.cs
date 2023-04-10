@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using nadena.dev.modular_avatar.editor.ErrorReporting;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
@@ -20,7 +21,7 @@ namespace nadena.dev.modular_avatar.core.editor
             internal ClipHolder(Motion clip)
             {
                 CurrentClip = OriginalClip = clip;
-                IsProxyAnimation = Util.IsProxyAnimation(clip);
+                IsProxyAnimation = clip != null && Util.IsProxyAnimation(clip);
             }
         }
 
@@ -37,6 +38,26 @@ namespace nadena.dev.modular_avatar.core.editor
             foreach (var clip in _clips)
             {
                 if (clip.IsProxyAnimation) clip.CurrentClip = clip.OriginalClip;
+            }
+
+            foreach (var clip in _clips)
+            {
+                // Changing the "high quality curve" setting can result in behavior changes (but can happen accidentally
+                // as we manipulate curves)
+                if (clip.CurrentClip != clip.OriginalClip && clip.CurrentClip != null && clip.OriginalClip != null)
+                {
+                    SerializedObject before = new SerializedObject(clip.OriginalClip);
+                    SerializedObject after = new SerializedObject(clip.CurrentClip);
+
+                    var before_prop = before.FindProperty("m_UseHighQualityCurve");
+                    var after_prop = after.FindProperty("m_UseHighQualityCurve");
+
+                    if (after_prop.boolValue != before_prop.boolValue)
+                    {
+                        after_prop.boolValue = before_prop.boolValue;
+                        after.ApplyModifiedPropertiesWithoutUndo();
+                    }
+                }
             }
 
             foreach (var action in _clipCommitActions)
@@ -61,10 +82,13 @@ namespace nadena.dev.modular_avatar.core.editor
             {
                 if (!layer.isDefault && layer.animatorController is AnimatorController ac && Util.IsTemporaryAsset(ac))
                 {
-                    foreach (var state in Util.States(ac))
+                    BuildReport.ReportingObject(ac, () =>
                     {
-                        RegisterState(state);
-                    }
+                        foreach (var state in Util.States(ac))
+                        {
+                            RegisterState(state);
+                        }
+                    });
                 }
             }
         }
@@ -135,6 +159,11 @@ namespace nadena.dev.modular_avatar.core.editor
             Dictionary<Motion, ClipHolder> originalToHolder
         )
         {
+            if (motion == null)
+            {
+                return new ClipHolder(null);
+            }
+
             if (originalToHolder.TryGetValue(motion, out var holder))
             {
                 return holder;

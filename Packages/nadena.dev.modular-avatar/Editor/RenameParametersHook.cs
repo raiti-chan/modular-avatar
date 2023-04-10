@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
+using nadena.dev.modular_avatar.editor.ErrorReporting;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
@@ -71,9 +72,11 @@ namespace nadena.dev.modular_avatar.core.editor
             expParams.parameters = parameters.ToArray();
             if (expParams.CalcTotalCost() > VRCExpressionParameters.MAX_PARAMETER_COST)
             {
-                throw new Exception("Too many synced parameters: " +
-                                    "Cost " + expParams.CalcTotalCost() + " > "
-                                    + VRCExpressionParameters.MAX_PARAMETER_COST
+                BuildReport.LogFatal("error.rename_params.too_many_synced_params", new[]
+                    {
+                        "" + expParams.CalcTotalCost(),
+                        "" + VRCExpressionParameters.MAX_PARAMETER_COST,
+                    }
                 );
             }
 
@@ -89,7 +92,7 @@ namespace nadena.dev.modular_avatar.core.editor
             var p = obj.GetComponent<ModularAvatarParameters>();
             if (p != null)
             {
-                ApplyRemappings(p, ref remaps, ref prefixRemaps);
+                BuildReport.ReportingObject(p, () => ApplyRemappings(p, ref remaps, ref prefixRemaps));
             }
 
             var willPurgeAnimators = false;
@@ -104,76 +107,79 @@ namespace nadena.dev.modular_avatar.core.editor
 
             foreach (var component in obj.GetComponents<Component>())
             {
-                switch (component)
+                BuildReport.ReportingObject(component, () =>
                 {
-                    case VRCPhysBone bone:
+                    switch (component)
                     {
-                        if (bone.parameter != null && prefixRemaps.TryGetValue(bone.parameter, out var newVal))
+                        case VRCPhysBone bone:
                         {
-                            bone.parameter = newVal;
+                            if (bone.parameter != null && prefixRemaps.TryGetValue(bone.parameter, out var newVal))
+                            {
+                                bone.parameter = newVal;
+                            }
+
+                            break;
                         }
 
-                        break;
+                        case VRCContactReceiver contact:
+                        {
+                            if (contact.parameter != null && remaps.TryGetValue(contact.parameter, out var newVal))
+                            {
+                                contact.parameter = newVal;
+                            }
+
+                            break;
+                        }
+
+                        case Animator anim:
+                        {
+                            if (willPurgeAnimators) break; // animator will be deleted in subsequent processing
+
+                            // RuntimeAnimatorController may be AnimatorOverrideController, convert in case of AnimatorOverrideController
+                            if (anim.runtimeAnimatorController is AnimatorOverrideController overrideController)
+                            {
+                                anim.runtimeAnimatorController = _context.ConvertAnimatorController(overrideController);
+                            }
+
+                            var controller = anim.runtimeAnimatorController as AnimatorController;
+                            if (controller != null)
+                            {
+                                ProcessAnimator(ref controller, remaps);
+                                anim.runtimeAnimatorController = controller;
+                            }
+
+                            break;
+                        }
+
+                        case ModularAvatarMergeAnimator merger:
+                        {
+                            // RuntimeAnimatorController may be AnimatorOverrideController, convert in case of AnimatorOverrideController
+                            if (merger.animator is AnimatorOverrideController overrideController)
+                            {
+                                merger.animator = _context.ConvertAnimatorController(overrideController);
+                            }
+
+                            var controller = merger.animator as AnimatorController;
+                            if (controller != null)
+                            {
+                                ProcessAnimator(ref controller, remaps);
+                                merger.animator = controller;
+                            }
+
+                            break;
+                        }
+
+                        case ModularAvatarMenuInstaller installer:
+                        {
+                            if (installer.menuToAppend != null && installer.enabled)
+                            {
+                                ProcessMenu(ref installer.menuToAppend, remaps);
+                            }
+
+                            break;
+                        }
                     }
-
-                    case VRCContactReceiver contact:
-                    {
-                        if (contact.parameter != null && remaps.TryGetValue(contact.parameter, out var newVal))
-                        {
-                            contact.parameter = newVal;
-                        }
-
-                        break;
-                    }
-
-                    case Animator anim:
-                    {
-                        if (willPurgeAnimators) break; // animator will be deleted in subsequent processing
-
-                        // RuntimeAnimatorController may be AnimatorOverrideController, convert in case of AnimatorOverrideController
-                        if (anim.runtimeAnimatorController is AnimatorOverrideController overrideController)
-                        {
-                            anim.runtimeAnimatorController = _context.ConvertAnimatorController(overrideController);
-                        }
-
-                        var controller = anim.runtimeAnimatorController as AnimatorController;
-                        if (controller != null)
-                        {
-                            ProcessAnimator(ref controller, remaps);
-                            anim.runtimeAnimatorController = controller;
-                        }
-
-                        break;
-                    }
-
-                    case ModularAvatarMergeAnimator merger:
-                    {
-                        // RuntimeAnimatorController may be AnimatorOverrideController, convert in case of AnimatorOverrideController
-                        if (merger.animator is AnimatorOverrideController overrideController)
-                        {
-                            merger.animator = _context.ConvertAnimatorController(overrideController);
-                        }
-
-                        var controller = merger.animator as AnimatorController;
-                        if (controller != null)
-                        {
-                            ProcessAnimator(ref controller, remaps);
-                            merger.animator = controller;
-                        }
-
-                        break;
-                    }
-
-                    case ModularAvatarMenuInstaller installer:
-                    {
-                        if (installer.menuToAppend != null && installer.enabled)
-                        {
-                            ProcessMenu(ref installer.menuToAppend, remaps);
-                        }
-
-                        break;
-                    }
-                }
+                });
             }
 
             foreach (Transform child in obj.transform)
@@ -254,6 +260,14 @@ namespace nadena.dev.modular_avatar.core.editor
                 if (visited.Contains(sm)) continue;
                 visited.Add(sm);
 
+                foreach (var behavior in sm.behaviours)
+                {
+                    if (behavior is VRCAvatarParameterDriver driver)
+                    {
+                        ProcessDriver(driver, remaps);
+                    }
+                }
+
                 foreach (var t in sm.anyStateTransitions)
                 {
                     ProcessTransition(t, remaps);
@@ -313,13 +327,20 @@ namespace nadena.dev.modular_avatar.core.editor
             blendTree.blendParameter = remap(remaps, blendTree.blendParameter);
             blendTree.blendParameterY = remap(remaps, blendTree.blendParameterY);
 
-            foreach (var childMotion in blendTree.children)
+            var children = blendTree.children;
+            for (int i = 0; i < children.Length; i++)
             {
+                var childMotion = children[i];
                 if (childMotion.motion is BlendTree subTree)
                 {
                     ProcessBlendtree(subTree, remaps);
                 }
+
+                childMotion.directBlendParameter = remap(remaps, childMotion.directBlendParameter);
+                children[i] = childMotion;
             }
+
+            blendTree.children = children;
         }
 
         private void ProcessDriver(VRCAvatarParameterDriver driver, ImmutableDictionary<string, string> remaps)

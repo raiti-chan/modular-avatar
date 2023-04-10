@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using nadena.dev.modular_avatar.editor.ErrorReporting;
 using UnityEngine;
 using UnityEngine.Animations;
 using VRC.SDK3.Avatars.Components;
@@ -55,13 +56,13 @@ namespace nadena.dev.modular_avatar.core.editor
             }
         }
 
-        public void Process()
+        public void Process(BuildContext context)
         {
             bool didWork = false;
 
             foreach (var target in _avatar.GetComponentsInChildren<ModularAvatarVisibleHeadAccessory>(true))
             {
-                var w = Process(target);
+                var w = BuildReport.ReportingObject(target, () => Process(target));
                 didWork = didWork || w;
             }
 
@@ -70,7 +71,8 @@ namespace nadena.dev.modular_avatar.core.editor
                 // Process meshes
                 foreach (var smr in _avatar.GetComponentsInChildren<SkinnedMeshRenderer>(true))
                 {
-                    new VisibleHeadAccessoryMeshProcessor(smr, _visibleBones, _proxyHead).Retarget();
+                    BuildReport.ReportingObject(smr,
+                        () => new VisibleHeadAccessoryMeshProcessor(smr, _visibleBones, _proxyHead).Retarget(context));
                 }
             }
         }
