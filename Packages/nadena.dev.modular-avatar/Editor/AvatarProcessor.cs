@@ -51,6 +51,8 @@ namespace nadena.dev.modular_avatar.core.editor
 
         public delegate void AvatarProcessorCallback(GameObject obj);
 
+        public static event AvatarProcessorCallback BeforeProcessing;
+
         /// <summary>
         /// This API is NOT stable. Do not use it yet.
         /// </summary>
@@ -155,6 +157,7 @@ namespace nadena.dev.modular_avatar.core.editor
                         Object.DestroyImmediate(component);
                     }
                 }
+                BeforeProcessing?.Invoke(avatarGameObject);
 
                 var context = new BuildContext(vrcAvatarDescriptor);
 
