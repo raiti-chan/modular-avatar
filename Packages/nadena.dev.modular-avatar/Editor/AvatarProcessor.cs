@@ -23,8 +23,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using nadena.dev.modular_avatar.editor.ErrorReporting;
@@ -66,6 +68,18 @@ namespace nadena.dev.modular_avatar.core.editor
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
         }
 
+        [MenuItem("GameObject/[ModularAvatar] Manual bake avatar", true, 49)]
+        static bool ValidateApplyToCurrentAvatarGameobject()
+        {
+            return ValidateApplyToCurrentAvatar();
+        }
+
+        [MenuItem("GameObject/[ModularAvatar] Manual bake avatar", false, 49)]
+        static void ApplyToCurrentAvatarGameobject()
+        {
+            ApplyToCurrentAvatar();
+        }
+
         [MenuItem("Tools/Modular Avatar/Manual bake avatar", true)]
         private static bool ValidateApplyToCurrentAvatar()
         {
@@ -102,6 +116,7 @@ namespace nadena.dev.modular_avatar.core.editor
                 BuildReport.Clear();
 
                 ProcessAvatar(avatar);
+                Selection.objects = new Object[] { avatar };
             }
             finally
             {
@@ -149,75 +164,124 @@ namespace nadena.dev.modular_avatar.core.editor
             {
                 try
                 {
-                    AssetDatabase.StartAssetEditing();
-                    nowProcessing = true;
-
-                    BeforeProcessing?.Invoke(avatarGameObject);
-
-                    ClearEditorOnlyTagComponents(avatarGameObject.transform);
-
-                    BoneDatabase.ResetBones();
-                    PathMappings.Init(vrcAvatarDescriptor.gameObject);
-                    ClonedMenuMappings.Clear();
-
-                    // Sometimes people like to nest one avatar in another, when transplanting clothing. To avoid issues
-                    // with inconsistently determining the avatar root, we'll go ahead and remove the extra sub-avatars
-                    // here.
-                    foreach (Transform directChild in avatarGameObject.transform)
+                    try
                     {
-                        foreach (var component in directChild.GetComponentsInChildren<VRCAvatarDescriptor>(true))
+                        AssetDatabase.StartAssetEditing();
+                        nowProcessing = true;
+
+                        BeforeProcessing?.Invoke(avatarGameObject);
+
+                        ClearEditorOnlyTagComponents(avatarGameObject.transform);
+
+                        BoneDatabase.ResetBones();
+                        PathMappings.Init(vrcAvatarDescriptor.gameObject);
+                        ClonedMenuMappings.Clear();
+
+                        // Sometimes people like to nest one avatar in another, when transplanting clothing. To avoid issues
+                        // with inconsistently determining the avatar root, we'll go ahead and remove the extra sub-avatars
+                        // here.
+                        foreach (Transform directChild in avatarGameObject.transform)
                         {
-                            Object.DestroyImmediate(component);
+                            foreach (var component in directChild.GetComponentsInChildren<VRCAvatarDescriptor>(true))
+                            {
+                                Object.DestroyImmediate(component);
+                            }
+
+                            foreach (var component in directChild.GetComponentsInChildren<PipelineSaver>(true))
+                            {
+                                Object.DestroyImmediate(component);
+                            }
                         }
 
-                        foreach (var component in directChild.GetComponentsInChildren<PipelineSaver>(true))
-                        {
-                            Object.DestroyImmediate(component);
-                        }
+                        var context = new BuildContext(vrcAvatarDescriptor);
+
+                        new ActionGenerator(context).OnPreprocessAvatar(vrcAvatarDescriptor);
+                        new RenameParametersHook().OnPreprocessAvatar(avatarGameObject, context);
+                        new MergeAnimatorProcessor().OnPreprocessAvatar(avatarGameObject, context);
+                        context.AnimationDatabase.Bootstrap(vrcAvatarDescriptor);
+
+                        new MenuInstallHook().OnPreprocessAvatar(avatarGameObject, context);
+                        new MergeArmatureHook().OnPreprocessAvatar(context, avatarGameObject);
+                        new BoneProxyProcessor().OnPreprocessAvatar(avatarGameObject);
+                        new VisibleHeadAccessoryProcessor(vrcAvatarDescriptor).Process(context);
+                        new RemapAnimationPass(vrcAvatarDescriptor).Process(context.AnimationDatabase);
+                        new BlendshapeSyncAnimationProcessor().OnPreprocessAvatar(avatarGameObject, context);
+                        PhysboneBlockerPass.Process(avatarGameObject);
+
+                        context.AnimationDatabase.Commit();
+
+                        new GCGameObjectsPass(context, avatarGameObject).OnPreprocessAvatar();
+
+                        AfterProcessing?.Invoke(avatarGameObject);
                     }
+                    finally
+                    {
+                        AssetDatabase.StopAssetEditing();
 
-                    var context = new BuildContext(vrcAvatarDescriptor);
+                        nowProcessing = false;
 
-                    new RenameParametersHook().OnPreprocessAvatar(avatarGameObject, context);
-                    new MergeAnimatorProcessor().OnPreprocessAvatar(avatarGameObject, context);
-                    context.AnimationDatabase.Bootstrap(vrcAvatarDescriptor);
+                        // Ensure that we clean up AvatarTagComponents after failed processing. This ensures we don't re-enter
+                        // processing from the Awake method on the unprocessed AvatarTagComponents
+                        var toDestroy = avatarGameObject.GetComponentsInChildren<AvatarTagComponent>(true).ToList();
+                        var retryDestroy = new List<AvatarTagComponent>();
 
-                    new MenuInstallHook().OnPreprocessAvatar(avatarGameObject, context);
-                    new MergeArmatureHook().OnPreprocessAvatar(context, avatarGameObject);
-                    new BoneProxyProcessor().OnPreprocessAvatar(avatarGameObject);
-                    new VisibleHeadAccessoryProcessor(vrcAvatarDescriptor).Process(context);
-                    new RemapAnimationPass(vrcAvatarDescriptor).Process(context.AnimationDatabase);
-                    new BlendshapeSyncAnimationProcessor().OnPreprocessAvatar(avatarGameObject, context);
-                    PhysboneBlockerPass.Process(avatarGameObject);
+                        // Sometimes AvatarTagComponents have interdependencies and need to be deleted in the right order;
+                        // retry until we purge them all.
+                        bool madeProgress = true;
+                        while (toDestroy.Count > 0)
+                        {
+                            if (!madeProgress)
+                            {
+                                throw new Exception("One or more components failed to destroy." +
+                                                    RuntimeUtil.AvatarRootPath(toDestroy[0].gameObject));
+                            }
 
-                    context.AnimationDatabase.Commit();
+                            foreach (var component in toDestroy)
+                            {
+                                try
+                                {
+                                    if (component != null)
+                                    {
+                                        UnityEngine.Object.DestroyImmediate(component);
+                                        madeProgress = true;
+                                    }
+                                }
+                                catch (Exception e)
+                                {
+                                    retryDestroy.Add(component);
+                                }
+                            }
 
-                    AfterProcessing?.Invoke(avatarGameObject);
+                            toDestroy = retryDestroy;
+                            retryDestroy = new List<AvatarTagComponent>();
+                        }
+
+                        var activator = avatarGameObject.GetComponent<AvatarActivator>();
+                        if (activator != null)
+                        {
+                            UnityEngine.Object.DestroyImmediate(activator);
+                        }
+
+                        ClonedMenuMappings.Clear();
+
+                        AssetDatabase.SaveAssets();
+
+                        Resources.UnloadUnusedAssets();
+                    }
+                }
+                catch (Exception e)
+                {
+                    BuildReport.LogException(e);
+                    throw;
                 }
                 finally
                 {
-                    AssetDatabase.StopAssetEditing();
-
-                    nowProcessing = false;
-
-                    // Ensure that we clean up AvatarTagComponents after failed processing. This ensures we don't re-enter
-                    // processing from the Awake method on the unprocessed AvatarTagComponents
-                    foreach (var component in avatarGameObject.GetComponentsInChildren<AvatarTagComponent>(true))
-                    {
-                        UnityEngine.Object.DestroyImmediate(component);
-                    }
-
-                    var activator = avatarGameObject.GetComponent<AvatarActivator>();
-                    if (activator != null)
-                    {
-                        UnityEngine.Object.DestroyImmediate(activator);
-                    }
-
-                    ClonedMenuMappings.Clear();
-
                     ErrorReportUI.MaybeOpenErrorReportUI();
+                }
 
-                    AssetDatabase.SaveAssets();
+                if (!BuildReport.CurrentReport.CurrentAvatar.successful)
+                {
+                    throw new Exception("Fatal error reported during avatar processing.");
                 }
             }
         }
@@ -273,13 +337,13 @@ namespace nadena.dev.modular_avatar.core.editor
                 var animator = avatarGameObject.GetComponent<Animator>();
                 var builder = ty_VRCSdkControlPanelAvatarBuilder3A.GetConstructor(Type.EmptyTypes)
                     .Invoke(Array.Empty<object>());
-                var perfStats = ty_AvatarPerformanceStats.GetConstructor(new[] {typeof(bool)})
-                    .Invoke(new object[] {false});
+                var perfStats = ty_AvatarPerformanceStats.GetConstructor(new[] { typeof(bool) })
+                    .Invoke(new object[] { false });
                 ty_VRCSdkControlPanelAvatarBuilder3A
                     .GetMethod("RegisterBuilder", BindingFlags.Public | BindingFlags.Instance)
-                    .Invoke(builder, new object[] {tempControlPanel});
+                    .Invoke(builder, new object[] { tempControlPanel });
                 ty_VRCSdkControlPanelAvatarBuilder3A.GetMethod("ValidateFeatures").Invoke(
-                    builder, new object[] {avatar, animator, perfStats}
+                    builder, new object[] { avatar, animator, perfStats }
                 );
             }
             catch (Exception e)
