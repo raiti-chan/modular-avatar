@@ -54,7 +54,7 @@ namespace nadena.dev.modular_avatar.core.editor
         /// </summary>
         private static bool nowProcessing = false;
 
-        internal delegate void AvatarProcessorCallback(GameObject obj, BuildContext context);
+        public delegate void AvatarProcessorCallback(GameObject obj);
 
         public static event AvatarProcessorCallback BeforeProcessing;
 
@@ -194,7 +194,7 @@ namespace nadena.dev.modular_avatar.core.editor
 
                         var context = new BuildContext(vrcAvatarDescriptor);
                         
-                        BeforeProcessing?.Invoke(avatarGameObject)
+                        BeforeProcessing?.Invoke(avatarGameObject);
                         new RenameParametersHook().OnPreprocessAvatar(avatarGameObject, context);
                         new MergeAnimatorProcessor().OnPreprocessAvatar(avatarGameObject, context);
                         context.AnimationDatabase.Bootstrap(vrcAvatarDescriptor);
@@ -207,7 +207,7 @@ namespace nadena.dev.modular_avatar.core.editor
                         new BlendshapeSyncAnimationProcessor().OnPreprocessAvatar(avatarGameObject, context);
                         PhysboneBlockerPass.Process(avatarGameObject);
 
-                        AfterProcessing?.Invoke(avatarGameObject, context);
+                        AfterProcessing?.Invoke(avatarGameObject);
 
                         context.AnimationDatabase.Commit();
 
